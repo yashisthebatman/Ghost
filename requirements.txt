@@ -1,0 +1,22 @@
+# FastAPI and Server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0.post1
+
+# Database and Migrations
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.12.1
+
+# MLOps and Data Handling
+mlflow==2.8.1
+numpy==1.26.2
+pandas==2.1.3
+scikit-learn==1.3.2
+pyarrow==14.0.1  # For Parquet file format support
+
+# ML Model Core
+# Pinned to a known stable version of PyTorch with CPU support
+torch==2.1.1
+
+# Utilities
+python-dotenv==1.0.0
