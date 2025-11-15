@@ -12,7 +12,7 @@ mlflow==2.8.1
 numpy==1.26.2
 pandas==2.1.3
 scikit-learn==1.3.2
-pyarrow==14.0.1  # For Parquet file format support
+pyarrow==14.0.1
 
 # ML Model Core
 # Pinned to a known stable version of PyTorch with CPU support
@@ -20,3 +20,4 @@ torch==2.1.1
 
 # Utilities
 python-dotenv==1.0.0
+tqdm==4.66.1

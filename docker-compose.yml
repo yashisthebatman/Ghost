@@ -46,6 +46,7 @@ services:
     env_file: .env
     environment:
       - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - PYTHONPATH=/
     ports:
       - "8000:8000"
     volumes:
