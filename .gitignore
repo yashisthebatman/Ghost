@@ -56,4 +56,6 @@ frontend/.env*
 .DS_Store
 
 #Data Files
-data/
+data/raw/
+data/processed/snippets/
+data/processed/snippets_metadata.csv
