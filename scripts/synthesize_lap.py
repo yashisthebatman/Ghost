@@ -7,6 +7,7 @@ import numpy as np
 import joblib
 from pathlib import Path
 from sqlalchemy import func
+from scipy.ndimage import zoom
 
 # Boilerplate setup
 sys.path.insert(0, '/app')
@@ -19,6 +20,7 @@ MODEL_DIR = Path("/data/models")
 OUTPUT_DIR = DATA_DIR / "ghost_laps"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SCALER_PATH = DATA_DIR / "scaler.joblib"
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # --- MODEL ARCHITECTURE ---
@@ -46,14 +48,14 @@ def load_model(name):
     except: return None
 
 def synthesize():
-    print("\n🏁 STARTING FULL LAP SYNTHESIS (2:04 TARGET)...")
+    print("\n🏁 STARTING PHYSICS-CORRECTED SYNTHESIS...")
     
     if not SCALER_PATH.exists():
-        print("❌ Scaler missing. Run process_telemetry.py first.")
+        print("❌ Scaler missing.")
         return
     scaler = joblib.load(SCALER_PATH)
 
-    # 1. Load Models (Context Switching)
+    # 1. Load Models
     models = {
         "Turn": load_model("Turn"),
         "Straight": load_model("Straight"),
@@ -62,44 +64,59 @@ def synthesize():
     }
     default_model = next((m for m in models.values() if m), None)
     if not default_model:
-        print("❌ No models found in /data/models.")
+        print("❌ No models found.")
         return
 
-    # 2. Find the Reference Lap (The Longest One)
+    # 2. Query Track Data
     db = SessionLocal()
-    # Query finds the lap_number with the MAXIMUM count of sectors
     best_lap = db.query(MicroSectors.lap_number)\
                  .group_by(MicroSectors.lap_number)\
                  .order_by(func.count(MicroSectors.id).desc())\
                  .first()
     
-    if not best_lap:
-        print("❌ No sector data in DB.")
-        return
-    
+    if not best_lap: return
     target_lap = best_lap[0]
     
-    # 3. Fetch ALL sectors for that lap
-    sectors = db.query(MicroSectors).filter(MicroSectors.lap_number == target_lap).order_by(MicroSectors.id).all()
-    print(f"✅ Selected Reference Lap: {target_lap} ({len(sectors)} sectors)")
+    # ORDER BY ID IS CRITICAL FOR TRACK SHAPE
+    sectors = db.query(MicroSectors)\
+                .filter(MicroSectors.lap_number == target_lap)\
+                .order_by(MicroSectors.id)\
+                .all()
     
-    # 4. Generate Sequence
+    print(f"✅ Processing {len(sectors)} sectors for Lap {target_lap}")
+    
+    # 3. Generate & Resample
     ghost_data = []
+    
     with torch.no_grad():
         for sector in sectors:
-            # Intelligent Model Selection
             active_model = models.get(sector.sector_type, default_model)
             
-            # Condition: Optimize time by 1%
-            target_time = sector.time_delta * 0.99
+            # Physics Conditioning
+            target_time = float(sector.time_delta)
+            entry_speed = float(sector.entry_speed)
             
-            cond = torch.tensor([[target_time, sector.entry_speed]], dtype=torch.float32).to(DEVICE)
+            cond = torch.tensor([[target_time, entry_speed]], dtype=torch.float32).to(DEVICE)
             z = torch.randn(1, 64).to(DEVICE)
             
-            fake = active_model(z, cond).cpu().numpy()[0]
-            ghost_data.append(fake)
+            # 1. Raw Output (Always 100 points / 1.0 sec duration in latent space)
+            fake_raw = active_model(z, cond).cpu().numpy()[0] # Shape: (100, 7)
+            
+            # 2. Time Resampling (CRITICAL FIX)
+            # We need to squash/stretch 100 points to match 'target_time'
+            # Assuming 100Hz target rate:
+            target_points = max(int(target_time * 100), 5) # Min 5 points to prevent collapse
+            
+            # Calculate zoom factor (e.g., 0.5 to shrink 100 -> 50)
+            zoom_factor = target_points / 100.0
+            
+            # Resample along axis 0 (time), keep axis 1 (features)
+            # We use order=1 (linear interpolation) for smoothness
+            fake_resampled = zoom(fake_raw, (zoom_factor, 1), order=1)
+            
+            ghost_data.append(fake_resampled)
 
-    # 5. Stitch & Save
+    # 4. Stitch & Physics Correction
     if ghost_data:
         full_lap_norm = np.concatenate(ghost_data, axis=0)
         full_lap_phys = scaler.inverse_transform(full_lap_norm)
@@ -107,9 +124,24 @@ def synthesize():
         cols = ['speed', 'ath', 'pbrake_f', 'Steering_Angle', 'Steering_Angle_roc', 'ath_roc', 'pbrake_f_roc']
         df = pd.DataFrame(full_lap_phys, columns=cols)
         
-        # Clean Physics
+        # --- FIX 1: Speed Units (Raw -> KPH) ---
+        max_speed = df['speed'].max()
+        if max_speed > 500:
+            print(f"   ⚠️ Detected Raw Speed Units (Max: {max_speed:.0f}). Scaling to KPH...")
+            scale_factor = max_speed / 270.0 # Assume GT3/Cup car max ~270kph
+            df['speed'] = df['speed'] / scale_factor
+        
+        # --- FIX 2: Throttle/Brake Units ---
+        if df['ath'].max() > 200:
+             df['ath'] = df['ath'] / (df['ath'].max() / 100.0)
+        
+        if df['pbrake_f'].max() > 200:
+             df['pbrake_f'] = df['pbrake_f'] / (df['pbrake_f'].max() / 100.0) # Normalize to ~100 bar/percent
+
+        # --- FIX 3: Cleanup ---
         df['speed'] = df['speed'].clip(lower=0)
         df['ath'] = df['ath'].clip(0, 100)
+        df['pbrake_f'] = df['pbrake_f'].clip(lower=0)
         
         # Time Index (100Hz)
         df['time'] = np.arange(len(df)) * 0.01
@@ -117,7 +149,11 @@ def synthesize():
         save_path = OUTPUT_DIR / "ghost_lap_final.parquet"
         df.to_parquet(save_path)
         
-        print(f"🎉 FULL GHOST LAP SAVED: {len(df)/100:.2f}s duration")
+        final_duration = df['time'].iloc[-1]
+        print(f"🎉 GHOST LAP SAVED")
+        print(f"   ⏱️ Actual Duration: {final_duration:.2f}s")
+        print(f"   🚀 Top Speed: {df['speed'].max():.1f} KPH")
+        print(f"   📂 {save_path}")
     
     db.close()
 
