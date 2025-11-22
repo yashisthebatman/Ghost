@@ -22,3 +22,7 @@ torch==2.1.1
 python-dotenv==1.0.0
 tqdm==4.66.1
 einops==0.7.0
+
+# --- TESTING ---
+pytest==7.4.3
+httpx==0.25.1
