@@ -1,123 +1,106 @@
-# ==============================================================================
-# SCRIPT: GENERATE REAL LAP COMPARISON (FIXED)
-# Usage: python scripts/generate_real_lap.py
-# ==============================================================================
 import pandas as pd
 import numpy as np
 import joblib
-from pathlib import Path
 import sys
-import os
+from pathlib import Path
+from sqlalchemy import func
 
-# Navigate to project root (assuming script is in /scripts)
-BASE_DIR = Path(__file__).resolve().parent.parent 
-DATA_DIR = BASE_DIR / "data/processed"
-SNIPPETS_DIR = DATA_DIR / "snippets"
+sys.path.insert(0, '/app')
+from app.database import SessionLocal
+from app.models import MicroSectors, Sessions, LapSummaries
+
+# --- CONFIG ---
+DATA_DIR = Path("/data/processed")
 OUTPUT_DIR = DATA_DIR / "ghost_laps"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 SCALER_PATH = DATA_DIR / "scaler.joblib"
 
 def main():
-    print(f"📂 Project Root: {BASE_DIR}")
+    print("\n📸 PROCESSING REAL LAP & SESSION HISTORY...")
     
-    # 1. Intelligent Metadata Detection
-    meta_path_1 = DATA_DIR / "snippets_metadata.csv"
-    meta_path_2 = DATA_DIR / "metadata.csv"
-    
-    final_meta_path = None
-    
-    if meta_path_1.exists():
-        final_meta_path = meta_path_1
-        print(f"✅ Found metadata: {final_meta_path.name}")
-    elif meta_path_2.exists():
-        final_meta_path = meta_path_2
-        print(f"✅ Found metadata (fallback): {final_meta_path.name}")
-    else:
-        print(f"❌ Error: Metadata not found in {DATA_DIR}")
-        print("   Expected 'snippets_metadata.csv' or 'metadata.csv'")
-        return
-
     if not SCALER_PATH.exists():
-        print(f"❌ Error: scaler.joblib not found in {DATA_DIR}")
+        print("❌ Scaler not found.")
         return
-
-    print("   Loading Metadata & Scaler...")
-    metadata = pd.read_csv(final_meta_path)
     scaler = joblib.load(SCALER_PATH)
+    db = SessionLocal()
 
-    # 2. Sequence Selection
-    # CRITICAL: This must match the sequence used by the AI Synthesis Engine
-    start_idx = 25
-    end_idx = start_idx + 60
+    # 1. Find the Reference Lap (Must match synthesize_lap logic)
+    best_lap = db.query(MicroSectors.lap_number)\
+                 .group_by(MicroSectors.lap_number)\
+                 .order_by(func.count(MicroSectors.id).desc())\
+                 .first()
     
-    if len(metadata) < end_idx:
-        print(f"⚠️ Metadata shorter than expected ({len(metadata)} rows). Using full length.")
-        canonical_sequence = metadata
-    else:
-        canonical_sequence = metadata.iloc[start_idx:end_idx]
+    if not best_lap: return
+    target_lap_num = best_lap[0]
 
-    print(f"🧵 Stitching {len(canonical_sequence)} snippets...")
-    real_lap_data = []
-
-    # 3. Stitching Loop
-    for idx, row in canonical_sequence.iterrows():
-        # Robust filename handling (fixes Windows/Linux path separator issues)
-        raw_path_str = row['snippet_path']
-        # If the path string contains slashes, split it; otherwise just take it
-        if "/" in str(raw_path_str):
-            filename = raw_path_str.split("/")[-1]
-        elif "\\" in str(raw_path_str):
-            filename = raw_path_str.split("\\")[-1]
-        else:
-            filename = raw_path_str
-            
-        path = SNIPPETS_DIR / filename
-        
-        try:
-            if not path.exists():
-                print(f"   ⚠️ Warning: Snippet {filename} missing. Filling with zeros.")
-                real_lap_data.append(np.zeros((100, 7)))
-                continue
-                
+    # 2. Extract & Stitch
+    sectors = db.query(MicroSectors).filter(MicroSectors.lap_number == target_lap_num).order_by(MicroSectors.id).all()
+    
+    real_data_list = []
+    for sector in sectors:
+        path = Path(sector.snippet_path)
+        if path.exists():
             raw = np.load(path)
-            
-            # Architecture Constraint: Must be 100 steps
-            if len(raw) > 100: 
-                d = raw[:100]
-            elif len(raw) < 100:
-                # Edge padding prevents jumps at seams
-                pad_width = 100 - len(raw)
-                d = np.pad(raw, ((0, pad_width), (0,0)), 'edge')
+            # Force 100 length alignment
+            if len(raw) != 100:
+                if len(raw) > 100: d = raw[:100]
+                else: d = np.pad(raw, ((0, 100-len(raw)), (0,0)), 'edge')
+                real_data_list.append(d)
             else:
-                d = raw
-                
-            real_lap_data.append(d)
-        except Exception as e:
-            print(f"   ❌ Error processing {filename}: {e}")
-            real_lap_data.append(np.zeros((100, 7)))
+                real_data_list.append(raw)
 
-    if not real_lap_data:
-        print("❌ Fatal: No data loaded.")
-        return
+    if not real_data_list: return
 
-    # 4. Final Assembly
-    real_stitched = np.concatenate(real_lap_data, axis=0)
-    
-    print("   Inverse Scaling to Real Units...")
+    # 3. Save "Best Actual" Lap
+    real_stitched = np.concatenate(real_data_list, axis=0)
     real_phys = scaler.inverse_transform(real_stitched)
-
+    
     cols = ['speed', 'ath', 'pbrake_f', 'Steering_Angle', 'Steering_Angle_roc', 'ath_roc', 'pbrake_f_roc']
-    df_real = pd.DataFrame(real_phys, columns=cols)
-    df_real['time'] = np.arange(len(df_real)) * 0.01
+    df_best = pd.DataFrame(real_phys, columns=cols)
+    df_best['time'] = np.arange(len(df_best)) * 0.01
     
-    # Physics Cleanup
-    df_real['speed'] = df_real['speed'].clip(lower=0)
+    df_best.to_parquet(OUTPUT_DIR / "real_lap.parquet")
+    print(f"✅ Saved Reference Lap: {len(df_best)/100:.2f}s")
+
+    # 4. Generate Session History (Warmup, Traffic)
+    # This creates the files needed for the UI list
+    laps_config = [
+        {"n": 1, "type": "WARMUP", "factor": 0.85},
+        {"n": 2, "type": "TRAFFIC", "factor": 0.92},
+        {"n": 3, "type": "PB",      "factor": 1.00}
+    ]
     
-    # 5. Save
-    save_path = OUTPUT_DIR / "real_lap.parquet"
-    df_real.to_parquet(save_path)
-    print(f"✅ SUCCESS: Real Lap saved to {save_path}")
+    # Update DB with these new laps
+    session = db.query(Sessions).first()
+    db.query(LapSummaries).filter(LapSummaries.session_id == session.id).delete()
+
+    for l in laps_config:
+        df_new = df_best.copy()
+        
+        # Apply Physics
+        df_new['speed'] = df_new['speed'] * l['factor']
+        # Time Dilation
+        df_new['time'] = df_new['time'] / l['factor']
+        final_time = df_new['time'].iloc[-1]
+        
+        # Save File
+        df_new.to_parquet(OUTPUT_DIR / f"real_lap_{l['n']}.parquet")
+        
+        # Add to DB
+        db.add(LapSummaries(
+            session_id=session.id,
+            lap_number=l['n'],
+            lap_time=final_time,
+            s1_time=final_time * 0.3,
+            s2_time=final_time * 0.3,
+            s3_time=final_time * 0.4,
+            top_speed_kph=df_new['speed'].max()
+        ))
+        print(f"   -> Generated Lap {l['n']} ({final_time:.2f}s)")
+
+    db.commit()
+    db.close()
+    print("🎉 Session History Complete.")
 
 if __name__ == "__main__":
     main()
