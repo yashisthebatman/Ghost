@@ -144,24 +144,57 @@ docker-compose exec backend python /scripts/register_laps_db.py
 ## 📂 Project Structure
 
 ```text
-├── backend/
-│   ├── app/                # FastAPI Application
-│   └── Dockerfile
-├── data/
-│   ├── models/             # Pre-trained .pth GAN models
-│   ├── processed/          # Generated Parquet files (Ghost & Real)
-│   └── raw/                # Source CSV telemetry
-├── frontend/
-│   ├── src/
-│   │   ├── components/     # HUD, TrackMap, Widgets
-│   │   ├── store/          # Zustand State Management
-│   │   └── App.jsx         # Main Simulation Loop
-│   └── Dockerfile
-├── scripts/
-│   ├── synthesize_lap.py   # The AI Generator Logic
-│   ├── generate_real_lap.py# Raw Data Extractor
-│   └── register_laps_db.py # DB Sync Utility
-└── docker-compose.yml
+Directory structure:
+└── yashisthebatman-ghost/
+    ├── readme.md
+    ├── docker-compose.yml
+    ├── LICENSE
+    ├── requirements.txt
+    ├── backend/
+    │   ├── Dockerfile
+    │   └── app/
+    │       ├── __init__.py
+    │       ├── database.py
+    │       ├── main.py
+    │       ├── models.py
+    │       └── tests/
+    │           └── test_main.py
+    ├── data/
+    │   └── processed/
+    │       └── scaler.joblib
+    ├── frontend/
+    │   ├── README.md
+    │   ├── Dockerfile
+    │   ├── eslint.config.js
+    │   ├── index.html
+    │   ├── nginx.conf
+    │   ├── package.json
+    │   ├── postcss.config.js
+    │   ├── tailwind.config.js
+    │   ├── vite.config.js
+    │   └── src/
+    │       ├── App.css
+    │       ├── App.jsx
+    │       ├── index.css
+    │       ├── main.jsx
+    │       ├── components/
+    │       │   ├── DashboardWidgets.jsx
+    │       │   ├── TrackMap.jsx
+    │       │   └── ui/
+    │       │       └── GlassPane.jsx
+    │       └── store/
+    │           └── simulationStore.js
+    └── scripts/
+        ├── __init__.py
+        ├── generate_real_lap.py
+        ├── generate_session_laps.py
+        ├── init_db.py
+        ├── populate_db.py
+        ├── process_telemetry.py
+        ├── register_laps_db.py
+        ├── synthesize_lap.py
+        └── train_gan.py
+
 ```
 
 ---
@@ -186,11 +219,3 @@ Distributed under the MIT License. See `LICENSE` for more information.
 <div align="center">
   <sub>Built with ❤️ by YashIsTheBatman</sub>
 </div>
-```
-
-### Instructions for images
-To make this README look perfect:
-1.  Create a folder named `docs` in your root directory.
-2.  Take a screenshot of your "Solo Mode" and name it `dashboard_solo.png`.
-3.  Take a screenshot of your "Compare Mode" and name it `dashboard_compare.png`.
-4.  Put those images in the `docs` folder. The README code above will automatically display them side-by-side.
