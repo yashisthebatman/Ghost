@@ -11,6 +11,7 @@ from models import Sessions, LapSummaries
 
 app = FastAPI(title="Ghost Engineer API")
 
+# --- CORS CONFIGURATION ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,50 +20,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- CONFIGURATION ---
+# Resolves to /app inside the Docker container
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data/processed/ghost_laps"
 
-# --- UTILS ---
+# --- UTILITY FUNCTIONS ---
 def load_telemetry_file(filename):
+    """
+    Loads a parquet file from the data directory.
+    Sanitizes data (NaNs, Infs) and ensures a time index exists.
+    """
     path = DATA_DIR / filename
+    
+    # Robustness: Try replacing underscores with spaces if file not found initially
     if not path.exists():
-        return None
-    try:
-        df = pd.read_parquet(path)
-        df = df.fillna(0).replace([np.inf, -np.inf], 0)
-        if 'time' not in df.columns:
-            df['time'] = np.arange(len(df)) * 0.01
-        return df.to_dict(orient="records")
-    except Exception as e:
-        print(f"Error reading {filename}: {e}")
-        return None
+        alt_name = filename.replace("_", " ")
+        path = DATA_DIR / alt_name
+    
+    if path.exists():
+        try:
+            df = pd.read_parquet(path)
+            
+            # 1. Sanitize Numerical Errors
+            df = df.fillna(0).replace([np.inf, -np.inf], 0)
+            
+            # 2. Ensure Time Column exists (Critical for Frontend Charts)
+            if 'time' not in df.columns:
+                # Create synthetic 100Hz time index if missing
+                df['time'] = np.arange(len(df)) * 0.01
+
+            # 3. Return as list of dicts (JSON compatible)
+            return df.to_dict(orient="records")
+        except Exception as e:
+            print(f"Error reading {filename}: {e}")
+            return None
+    return None
 
 # --- ENDPOINTS ---
 
 @app.get("/")
 def health():
-    return {"status": "online", "mode": "strict_db"}
+    """Health check to ensure backend is online."""
+    return {"status": "online", "mode": "strict_db", "version": "2.0.0"}
 
 @app.get("/session/context")
 def get_context(db: Session = Depends(get_db)):
-    # Strictly fetch from DB
+    """
+    Returns the metadata for the latest session (Vehicle ID, Weather).
+    Dependent on database population.
+    """
     session = db.query(Sessions).order_by(Sessions.processed_at.desc()).first()
+    
     if not session:
-        # Return empty structure if no session exists
+        # Return neutral default if DB is empty
         return {
             "vehicle_id": "WAITING_FOR_DATA",
-            "session_name": "--",
-            "weather": {"track_temp": 0, "condition": "--"}
+            "session_name": "No Session Loaded",
+            "weather": {"track_temp": 0, "condition": "N/A"}
         }
+        
     return {
         "vehicle_id": session.vehicle_id,
         "session_name": session.session_name,
-        "weather": session.weather_data
+        "weather": session.weather_data or {}
     }
 
 @app.get("/session/laps")
 def get_laps_list(db: Session = Depends(get_db)):
-    """Returns ONLY the laps present in the database."""
+    """
+    Returns the list of available human laps for the sidebar.
+    Renames them to 'Human Lap X' format.
+    """
     session = db.query(Sessions).order_by(Sessions.processed_at.desc()).first()
     if not session: 
         return []
@@ -73,34 +102,41 @@ def get_laps_list(db: Session = Depends(get_db)):
              .all()
     
     return [{
-        "lap_number": l.lap_number,
+        "id": l.lap_number,                  # Used for API lookups
+        "name": f"Human Lap {l.lap_number}", # Display Name
         "lap_time": l.lap_time,
         "s1": l.s1_time,
         "s2": l.s2_time,
         "s3": l.s3_time,
-        "status": "PB" if l.lap_number == 3 else "Attempt" # You can refine logic here
+        "status": "PB" if l.lap_number == 3 else "Attempt" # Simplified logic
     } for l in laps]
 
 @app.get("/laps/optimal")
 def get_optimal():
-    """Renamed from /laps/ghost to be specific"""
+    """
+    Returns the AI Generated Optimal Lap (Ghost).
+    Filename: ghost_lap_final.parquet
+    """
     data = load_telemetry_file("ghost_lap_final.parquet")
     if not data: 
-        raise HTTPException(404, "Optimal lap generation pending.")
+        raise HTTPException(status_code=404, detail="Optimal lap generation pending. Run synthesize_lap.py.")
     return data
 
 @app.get("/laps/human/{lap_id}")
 def get_human_lap(lap_id: int):
-    """Fetches a specific human attempt"""
+    """
+    Returns the telemetry for a specific human attempt.
+    Filename: real_lap_{id}.parquet
+    """
     filename = f"real_lap_{lap_id}.parquet"
-    # Handle PB naming convention if your script saves the best as 'real_lap.parquet'
-    # For this logic, we assume register_laps_db synced filenames correctly.
+    
     data = load_telemetry_file(filename)
     
-    # Fallback for the "best" lap if file naming is inconsistent
+    # Fallback: Sometimes the 'best' lap is named 'real_lap.parquet'
+    # If specific ID fails and it is lap 3 (usually the PB in our scripts), try the generic name
     if not data and lap_id == 3:
         data = load_telemetry_file("real_lap.parquet")
 
     if not data:
-         raise HTTPException(404, f"Lap {lap_id} not found.")
+         raise HTTPException(status_code=404, detail=f"Human Lap {lap_id} not found on disk.")
     return data
