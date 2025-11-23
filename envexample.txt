@@ -1,0 +1,12 @@
+# PostgreSQL Configuration
+POSTGRES_DB=ghost_db
+POSTGRES_USER=ghost_user
+POSTGRES_PASSWORD=strong_password
+
+# MLflow Configuration
+MLFLOW_TRACKING_URI=http://mlflow:5000
+
+# Data Processing Configuration
+TARGET_VEHICLE_ID=GR86-002-2
+TELEMETRY_FILE_PATH=/data/raw/road_america/race2/R2_road_america_telemetry_data.csv
+APPROX_LAP_TIME_SEC=130
